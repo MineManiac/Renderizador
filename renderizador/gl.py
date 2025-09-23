@@ -117,34 +117,48 @@ class GL:
 
     @staticmethod    
     def triangleSet2D(vertices, colors):
-        """Renderiza TriangleSet2D desenhando arestas dos triângulos (Projeto 1.1)."""
-        rgb = GL._get_rgb_from_colors(colors)
-        def draw_line(x0,y0,x1,y1):
-            x0,y0,x1,y1 = int(round(x0)), int(round(y0)), int(round(x1)), int(round(y1))
-            dx, dy = abs(x1-x0), -abs(y1-y0)
-            sx, sy = (1 if x0<x1 else -1), (1 if y0<y1 else -1)
-            err = dx + dy
-            while True:
-                if 0 <= x0 < GL.width and 0 <= y0 < GL.height:        # <-- bounds check
-                    gpu.GPU.draw_pixel([x0, y0], gpu.GPU.RGB8, rgb)
-                if x0==x1 and y0==y1: break
-                e2 = 2*err
-                if e2 >= dy:
-                    err += dy
-                    x0 += sx
-                if e2 <= dx:
-                    err += dx
-                    y0 += sy
-        # vertices: [x0,y0, x1,y1, x2,y2,  x3,y3, ...] (múltiplos de 6)
+        """Preenche triângulos 2D (Projeto 1.1)."""
+        import math
+        # usa emissiveColor; se vier em [0..1], converte pra [0..255]
+        rgb = colors.get('emissiveColor') or colors.get('diffuseColor') or [1.0, 1.0, 1.0]
+        if all(0.0 <= c <= 1.0 for c in rgb[:3]):
+            rgb = [int(rgb[0]*255), int(rgb[1]*255), int(rgb[2]*255)]
+        else:
+            rgb = [int(rgb[0]), int(rgb[1]), int(rgb[2])]
+        rgb = [max(0, min(255, v)) for v in rgb]
+
+        def edge(ax, ay, bx, by, cx, cy):
+            # função de aresta (orientada)
+            return (cy - ay) * (bx - ax) - (cx - ax) * (by - ay)
+
         assert len(vertices) % 6 == 0, "TriangleSet2D: número de valores deve ser múltiplo de 6"
         for i in range(0, len(vertices), 6):
-            x0,y0 = vertices[i+0], vertices[i+1]
-            x1,y1 = vertices[i+2], vertices[i+3]
-            x2,y2 = vertices[i+4], vertices[i+5]
-            # Desenha somente as arestas (fill virá no 1.4 se desejado)
-            draw_line(x0,y0, x1,y1)
-            draw_line(x1,y1, x2,y2)
-            draw_line(x2,y2, x0,y0)
+            x0, y0 = vertices[i+0], vertices[i+1]
+            x1, y1 = vertices[i+2], vertices[i+3]
+            x2, y2 = vertices[i+4], vertices[i+5]
+
+            # área (det) — pula triângulos degenerados
+            area = edge(x0, y0, x1, y1, x2, y2)
+            if area == 0:
+                continue
+
+            # bounding box (clamp às dimensões da tela)
+            xmin = max(0, int(math.floor(min(x0, x1, x2))))
+            xmax = min(GL.width - 1,  int(math.ceil (max(x0, x1, x2))))
+            ymin = max(0, int(math.floor(min(y0, y1, y2))))
+            ymax = min(GL.height - 1, int(math.ceil (max(y0, y1, y2))))
+
+            # varre a caixa e testa baricêntricas por sinal (aceita CW ou CCW)
+            for y in range(ymin, ymax + 1):
+                for x in range(xmin, xmax + 1):
+                    w0 = edge(x0, y0, x1, y1, x, y)
+                    w1 = edge(x1, y1, x2, y2, x, y)
+                    w2 = edge(x2, y2, x0, y0, x, y)
+                    # ponto está dentro se os três tiverem o mesmo sinal (>=0) ou (<=0)
+                    inside_pos = (w0 >= 0) and (w1 >= 0) and (w2 >= 0)
+                    inside_neg = (w0 <= 0) and (w1 <= 0) and (w2 <= 0)
+                    if inside_pos or inside_neg:
+                        gpu.GPU.draw_pixel([x, y], gpu.GPU.RGB8, rgb)
 
 
 
