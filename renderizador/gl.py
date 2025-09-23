@@ -158,38 +158,326 @@ class GL:
         M   = GL._model_stack[-1]
         VP  = GL._m4_mul(GL._proj, GL._view)
         MVP = GL._m4_mul(VP, M)
-        c = GL._m4_vec(MVP, v)
+        c = GL._m4_vec(MVP, v)          # clip
         if c[3] == 0:
             return None
-        x_ndc, y_ndc = c[0]/c[3], c[1]/c[3]
+        invw = 1.0 / c[3]
+        x_ndc, y_ndc, z_ndc = c[0]*invw, c[1]*invw, c[2]*invw   # NDC [-1,1]
         sx = (x_ndc * 0.5 + 0.5) * (GL.width  - 1)
         sy = (-y_ndc * 0.5 + 0.5) * (GL.height - 1)
-        return (sx, sy)
+        return (sx, sy, z_ndc, invw)
 
     @staticmethod
     def _fill_triangle_screen(p0, p1, p2, rgb):
-        import math
-        (X0,Y0), (X1,Y1), (X2,Y2) = p0, p1, p2
-        def edge(ax, ay, bx, by, cx, cy):
-            return (cy - ay) * (bx - ax) - (cx - ax) * (by - ay)
-        A = edge(X0, Y0, X1, Y1, X2, Y2)
-        if A == 0:
-            return
-        xmin = max(0,              int(math.floor(min(X0, X1, X2))))
-        xmax = min(GL.width  - 1,  int(math.ceil (max(X0, X1, X2))))
-        ymin = max(0,              int(math.floor(min(Y0, Y1, Y2))))
-        ymax = min(GL.height - 1,  int(math.ceil (max(Y0, Y1, Y2))))
-        for y in range(ymin, ymax+1):
-            for x in range(xmin, xmax+1):
-                w0 = edge(X0, Y0, X1, Y1, x, y)
-                w1 = edge(X1, Y1, X2, Y2, x, y)
-                w2 = edge(X2, Y2, X0, Y0, x, y)
-                inside_pos = (w0 >= 0) and (w1 >= 0) and (w2 >= 0)
-                inside_neg = (w0 <= 0) and (w1 <= 0) and (w2 <= 0)
-                if inside_pos or inside_neg:
-                    gpu.GPU.draw_pixel([x, y], gpu.GPU.RGB8, rgb)
+        # compat: chama o raster novo com cor flat
+        GL._raster_triangle(p0, p1, p2, rgb, None, None, base_alpha=1.0)
 
+# --- estado de frame, zbuffer e composição ---
+    _ssaa = 2                      # 2x2 amostras por pixel
+    _sub_offsets = [(0.25,0.25), (0.75,0.25), (0.25,0.75), (0.75,0.75)]
+
+    _zbuf_sub = None               # [h][w][4] em SSAA 2x2
+    _cbuf_sub = None               # [h][w][4][RGBA]
+    _cbuf = None                   # resolvido por pixel (RGB)
+    _frame_w = None
+    _frame_h = None
+
+    @staticmethod
+    def _begin_frame():
+        """Inicializa/limpa buffers por frame (com SSAA)."""
+        need_alloc = (GL._frame_w != GL.width) or (GL._frame_h != GL.height) \
+                    or (GL._zbuf_sub is None) or (GL._cbuf_sub is None) or (GL._cbuf is None)
+        GL._frame_w, GL._frame_h = GL.width, GL.height
+        n = GL._ssaa * GL._ssaa
+        if need_alloc:
+            GL._zbuf_sub = [[[+1.0 for _ in range(n)] for _ in range(GL.width)] for __ in range(GL.height)]
+            GL._cbuf_sub = [[[[0.0,0.0,0.0,0.0] for _ in range(n)] for _ in range(GL.width)] for __ in range(GL.height)]
+            GL._cbuf     = [[[0.0,0.0,0.0] for _ in range(GL.width)] for __ in range(GL.height)]
+        else:
+            for y in range(GL.height):
+                for x in range(GL.width):
+                    for s in range(n):
+                        GL._zbuf_sub[y][x][s] = +1.0
+                        GL._cbuf_sub[y][x][s][0] = 0.0
+                        GL._cbuf_sub[y][x][s][1] = 0.0
+                        GL._cbuf_sub[y][x][s][2] = 0.0
+                        GL._cbuf_sub[y][x][s][3] = 0.0
+                    GL._cbuf[y][x][0] = GL._cbuf[y][x][1] = GL._cbuf[y][x][2] = 0.0
     
+    @staticmethod
+    def _resolve_pixel(px, py):
+        """Média das subamostras para o framebuffer e escreve na GPU."""
+        n = GL._ssaa * GL._ssaa
+        acc_r = acc_g = acc_b = 0.0
+        for s in range(n):
+            acc_r += GL._cbuf_sub[py][px][s][0]
+            acc_g += GL._cbuf_sub[py][px][s][1]
+            acc_b += GL._cbuf_sub[py][px][s][2]
+        r = acc_r / n; g = acc_g / n; b = acc_b / n
+        GL._cbuf[py][px][0] = r; GL._cbuf[py][px][1] = g; GL._cbuf[py][px][2] = b
+        gpu.GPU.draw_pixel([px, py], gpu.GPU.RGB8, [int(max(0,min(255,r))), int(max(0,min(255,g))), int(max(0,min(255,b)))])
+    
+    @staticmethod
+    def _blend_over(src_rgb, src_a, dst_rgba):
+        """Composição 'source over' em 0..255; dst_rgba = [r,g,b,a] (a em [0..1])."""
+        a = max(0.0, min(1.0, float(src_a)))
+        inv = 1.0 - a
+        out_r = src_rgb[0]*a + dst_rgba[0]*inv
+        out_g = src_rgb[1]*a + dst_rgba[1]*inv
+        out_b = src_rgb[2]*a + dst_rgba[2]*inv
+        out_a = a + dst_rgba[3]*(1.0 - a)
+        return [out_r, out_g, out_b, out_a]
+
+    @staticmethod
+    def _present_pixel(px, py):
+        """Atualiza o framebuffer da GPU a partir do _cbuf (resolve SSAA=1)."""
+        r, g, b = GL._cbuf[py][px][:3]
+        gpu.GPU.draw_pixel([px, py], gpu.GPU.RGB8, [int(max(0, min(255, r))),
+                                                    int(max(0, min(255, g))),
+                                                    int(max(0, min(255, b)))])
+
+    @staticmethod
+    def _raster_triangle(v0, v1, v2, c0, c1, c2, base_alpha=1.0):
+        """
+        v* = (sx, sy, z_ndc, invw)
+        c* = [r,g,b] por vértice (0..255) ou None (usa flat via c0)
+        """
+        import math
+        X0,Y0,Z0,iw0 = v0; X1,Y1,Z1,iw1 = v1; X2,Y2,Z2,iw2 = v2
+
+        def edge(ax, ay, bx, by, cx, cy):
+            return (cx - ax)*(by - ay) - (cy - ay)*(bx - ax)
+
+        area = edge(X0, Y0, X1, Y1, X2, Y2)
+        if area == 0:
+            return
+        area_inv = 1.0 / area
+        xmin = max(0,             int(math.floor(min(X0, X1, X2))))
+        xmax = min(GL.width - 1,  int(math.ceil (max(X0, X1, X2))))
+        ymin = max(0,             int(math.floor(min(Y0, Y1, Y2))))
+        ymax = min(GL.height - 1, int(math.ceil (max(Y0, Y1, Y2))))
+
+        n = GL._ssaa * GL._ssaa
+        offs = GL._sub_offsets if GL._ssaa == 2 else [(0.5,0.5)]
+        alpha = max(0.0, min(1.0, base_alpha))
+
+        for py in range(ymin, ymax+1):
+            for px in range(xmin, xmax+1):
+                for s, (ox, oy) in enumerate(offs):
+                    sx = px + ox
+                    sy = py + oy
+
+                    w0 = edge(X1, Y1, X2, Y2, sx, sy)
+                    w1 = edge(X2, Y2, X0, Y0, sx, sy)
+                    w2 = edge(X0, Y0, X1, Y1, sx, sy)
+                    inside_pos = (w0 >= 0 and w1 >= 0 and w2 >= 0)
+                    inside_neg = (w0 <= 0 and w1 <= 0 and w2 <= 0)
+                    if not (inside_pos or inside_neg):
+                        continue
+
+                    l0 = w0 * area_inv
+                    l1 = w1 * area_inv
+                    l2 = w2 * area_inv
+
+                    zndc = l0*Z0 + l1*Z1 + l2*Z2  # NDC: near=-1, far=+1
+
+                    # opaco: z-test por subamostra
+                    if alpha >= 0.999:
+                        if zndc >= GL._zbuf_sub[py][px][s]:
+                            continue
+                        GL._zbuf_sub[py][px][s] = zndc
+
+                    # cor: perspectiva-correta se vier c0/c1/c2
+                    if (c0 is not None) and (c1 is not None) and (c2 is not None):
+                        denom = l0*iw0 + l1*iw1 + l2*iw2
+                        if denom != 0:
+                            r = (c0[0]*iw0*l0 + c1[0]*iw1*l1 + c2[0]*iw2*l2) / denom
+                            g = (c0[1]*iw0*l0 + c1[1]*iw1*l1 + c2[1]*iw2*l2) / denom
+                            b = (c0[2]*iw0*l0 + c1[2]*iw1*l1 + c2[2]*iw2*l2) / denom
+                            src = [r, g, b]
+                        else:
+                            src = [0.0, 0.0, 0.0]
+                    else:
+                        src = c0 if c0 is not None else [255.0, 255.0, 255.0]
+
+                    # escreve (opaco => sobrescreve; transparente => 'over')
+                    if alpha >= 0.999:
+                        GL._cbuf_sub[py][px][s][0] = src[0]
+                        GL._cbuf_sub[py][px][s][1] = src[1]
+                        GL._cbuf_sub[py][px][s][2] = src[2]
+                        GL._cbuf_sub[py][px][s][3] = 1.0
+                    else:
+                        GL._cbuf_sub[py][px][s] = GL._blend_over(src, alpha, GL._cbuf_sub[py][px][s])
+
+                # resolve pixel depois de mexer nas amostras
+                GL._resolve_pixel(px, py)
+    
+    @staticmethod
+    def _read_tex(tex_handle, u, v):
+        import math, numpy as _np
+        # wrap
+        u = u - math.floor(u)
+        v = v - math.floor(v)
+        u, v = 1.0 - v, u
+
+        # 1) se for imagem crua (numpy array RGBA)
+        if isinstance(tex_handle, _np.ndarray):
+            arr = _np.array(tex_handle)
+            H, W = arr.shape[0], arr.shape[1]
+            x = min(max(int(round(u * (W - 1))), 0), W - 1)
+            y = min(max(int(round(v * (H - 1))), 0), H - 1)
+            px = arr[y, x]
+            return [int(px[0]), int(px[1]), int(px[2])]
+
+        # 2) senão, usa a API da GPU (handle inteiro)
+        try:
+            return gpu.GPU.read_texture(tex_handle, [u, v])
+        except Exception:
+            try:
+                return gpu.GPU.read_texture(tex_handle, u, v)
+            except Exception:
+                return [255, 255, 255]
+    
+    # --- cache de texturas ---
+    _tex_cache = {}
+
+    @staticmethod
+    def _get_texture_handle(current_texture):
+        """
+        Retorna algo que represente a textura:
+        - se já for int (handle da GPU) -> retorna
+        - se for numpy.ndarray (imagem já carregada) -> retorna
+        - se for list/tuple/dict/str com caminho -> tenta carregar via GPU.load_texture(...)
+        """
+        import numpy as _np
+
+        # 1) já é handle ou imagem crua?
+        if isinstance(current_texture, int):
+            return current_texture
+        if isinstance(current_texture, _np.ndarray):
+            return current_texture
+
+        # 2) extrai uma 'key' (caminho) de estruturas comuns do X3D
+        key = None
+        if isinstance(current_texture, (list, tuple)) and current_texture:
+            # prioriza um handle inteiro; senão primeira string
+            for e in current_texture:
+                if isinstance(e, int):
+                    return e
+            for e in current_texture:
+                if isinstance(e, str):
+                    key = e
+                    break
+        elif isinstance(current_texture, dict):
+            if isinstance(current_texture.get('handle'), int):
+                return current_texture['handle']
+            u = current_texture.get('url') or current_texture.get('image')
+            if isinstance(u, (list, tuple)) and u:
+                key = u[0]
+            elif isinstance(u, str):
+                key = u
+        elif isinstance(current_texture, str):
+            key = current_texture
+
+        if not key:
+            return None
+
+        # 3) cache e carregamento
+        if not hasattr(GL, "_tex_cache"):
+            GL._tex_cache = {}
+        if key in GL._tex_cache:
+            return GL._tex_cache[key]
+
+        try:
+            handle = gpu.GPU.load_texture(key)   # pode devolver int ou uma matriz RGBA
+        except Exception:
+            handle = None
+        GL._tex_cache[key] = handle
+        return handle
+
+            
+    @staticmethod
+    def _raster_triangle_tex(v0, v1, v2, uv0, uv1, uv2, tex_handle, mod_colors=None, base_alpha=1.0):
+        """
+        v*  = (sx, sy, z_ndc, invw)
+        uv* = (u, v)
+        mod_colors: lista [(r,g,b) 0..255] por vértice OU None (usa só textura).
+        """
+        import math
+        X0,Y0,Z0,iw0 = v0; X1,Y1,Z1,iw1 = v1; X2,Y2,Z2,iw2 = v2
+        U0,V0 = uv0; U1,V1 = uv1; U2,V2 = uv2
+
+        def edge(ax, ay, bx, by, cx, cy):
+            return (cx - ax)*(by - ay) - (cy - ay)*(bx - ax)
+
+        area = edge(X0, Y0, X1, Y1, X2, Y2)
+        if area == 0:
+            return
+        area_inv = 1.0 / area
+        xmin = max(0,             int(math.floor(min(X0, X1, X2))))
+        xmax = min(GL.width - 1,  int(math.ceil (max(X0, X1, X2))))
+        ymin = max(0,             int(math.floor(min(Y0, Y1, Y2))))
+        ymax = min(GL.height - 1, int(math.ceil (max(Y0, Y1, Y2))))
+
+        n = GL._ssaa * GL._ssaa
+        offs = GL._sub_offsets if GL._ssaa == 2 else [(0.5,0.5)]
+        alpha = max(0.0, min(1.0, base_alpha))
+
+        for py in range(ymin, ymax+1):
+            for px in range(xmin, xmax+1):
+                for s, (ox, oy) in enumerate(offs):
+                    sx = px + ox
+                    sy = py + oy
+
+                    w0 = edge(X1, Y1, X2, Y2, sx, sy)
+                    w1 = edge(X2, Y2, X0, Y0, sx, sy)
+                    w2 = edge(X0, Y0, X1, Y1, sx, sy)
+                    inside_pos = (w0 >= 0 and w1 >= 0 and w2 >= 0)
+                    inside_neg = (w0 <= 0 and w1 <= 0 and w2 <= 0)
+                    if not (inside_pos or inside_neg):
+                        continue
+
+                    l0 = w0 * area_inv
+                    l1 = w1 * area_inv
+                    l2 = w2 * area_inv
+
+                    zndc = l0*Z0 + l1*Z1 + l2*Z2
+
+                    if alpha >= 0.999:
+                        if zndc >= GL._zbuf_sub[py][px][s]:
+                            continue
+                        GL._zbuf_sub[py][px][s] = zndc
+
+                    # UV perspectiva-corretos
+                    denom = l0*iw0 + l1*iw1 + l2*iw2
+                    if denom == 0:
+                        continue
+                    up = (U0*iw0*l0 + U1*iw1*l1 + U2*iw2*l2) / denom
+                    vp = (V0*iw0*l0 + V1*iw1*l1 + V2*iw2*l2) / denom
+
+                    tex_rgb = GL._read_tex(tex_handle, up, vp)
+                    r = float(tex_rgb[0]); g = float(tex_rgb[1]); b = float(tex_rgb[2])
+
+                    # modulação opcional por cor do vértice
+                    if mod_colors is not None:
+                        # interpola cor de modulação também perspectiva-correta
+                        c0,c1,c2 = mod_colors
+                        mr = (c0[0]*iw0*l0 + c1[0]*iw1*l1 + c2[0]*iw2*l2) / denom / 255.0
+                        mg = (c0[1]*iw0*l0 + c1[1]*iw1*l1 + c2[1]*iw2*l2) / denom / 255.0
+                        mb = (c0[2]*iw0*l0 + c1[2]*iw1*l1 + c2[2]*iw2*l2) / denom / 255.0
+                        r *= mr; g *= mg; b *= mb
+
+                    src = [r, g, b]
+                    if alpha >= 0.999:
+                        GL._cbuf_sub[py][px][s][0] = src[0]
+                        GL._cbuf_sub[py][px][s][1] = src[1]
+                        GL._cbuf_sub[py][px][s][2] = src[2]
+                        GL._cbuf_sub[py][px][s][3] = 1.0
+                    else:
+                        GL._cbuf_sub[py][px][s] = GL._blend_over(src, alpha, GL._cbuf_sub[py][px][s])
+
+                GL._resolve_pixel(px, py)
+        
 # ====================== 1.1: RASTER 2D =================
     @staticmethod
     def polypoint2D(point, colors):
@@ -319,17 +607,16 @@ class GL:
         # (emissiveColor), conforme implementar novos materias você deverá suportar outros
         # tipos de cores.
 
-        rgb = GL._get_rgb_from_colors(colors)
+        rgb_flat = GL._get_rgb_from_colors(colors)
+        alpha = 1.0 - float(colors.get('transparency', 0.0)) if isinstance(colors, dict) else 1.0
         assert len(point) % 9 == 0, "TriangleSet espera múltiplos de 9 (x,y,z por vértice)"
         for i in range(0, len(point), 9):
-            a = (point[i+0], point[i+1], point[i+2])
-            b = (point[i+3], point[i+4], point[i+5])
-            c = (point[i+6], point[i+7], point[i+8])
-            p0 = GL._project_point(*a)
-            p1 = GL._project_point(*b)
-            p2 = GL._project_point(*c)
-            if p0 and p1 and p2:
-                GL._fill_triangle_screen(p0, p1, p2, rgb)
+            a = GL._project_point(point[i+0], point[i+1], point[i+2])
+            b = GL._project_point(point[i+3], point[i+4], point[i+5])
+            c = GL._project_point(point[i+6], point[i+7], point[i+8])
+            if a and b and c:
+                # sem cores por vértice aqui → usa flat em c0 e None nas outras
+                GL._raster_triangle(a, b, c, rgb_flat, None, None, base_alpha=alpha)
 
 
     @staticmethod
@@ -348,6 +635,9 @@ class GL:
         GL._view = GL._m4_inverse_rigid(C)   # view = C^{-1}
         aspect = GL.width / GL.height if GL.height else 1.0
         GL._proj = GL._perspective(fieldOfView, aspect, GL.near, GL.far)
+
+        # <<< limpar buffers por frame >>>
+        GL._begin_frame()
     
 
     @staticmethod
@@ -391,6 +681,7 @@ class GL:
     @staticmethod
     def triangleStripSet(point, stripCount, colors):
         rgb = GL._get_rgb_from_colors(colors)
+        alpha = 1.0 - float(colors.get('transparency', 0.0)) if isinstance(colors, dict) else 1.0
         verts = [(point[i], point[i+1], point[i+2]) for i in range(0, len(point), 3)]
         cursor = 0
         for count in stripCount:
@@ -400,90 +691,154 @@ class GL:
                 continue
             for i in range(cursor+2, cursor+count):
                 a = verts[i-2]; b = verts[i-1]; c = verts[i]
-                # alterna winding: 0-based dentro da tira
+                # alterna winding para manter orientação consistente
                 if (i - cursor) % 2 == 0:
-                    a,b = b,a
+                    a, b = b, a
                 p0 = GL._project_point(*a)
                 p1 = GL._project_point(*b)
                 p2 = GL._project_point(*c)
                 if p0 and p1 and p2:
-                    GL._fill_triangle_screen(p0, p1, p2, rgb)
+                    GL._raster_triangle(p0, p1, p2, rgb, None, None, base_alpha=alpha)
             cursor += count
+
 
 
 # ====================== 1.3: STRIPS / INDEXADOS / FACESET ===============
     @staticmethod
     def indexedTriangleStripSet(point, index, colors):
         rgb = GL._get_rgb_from_colors(colors)
+        alpha = 1.0 - float(colors.get('transparency', 0.0)) if isinstance(colors, dict) else 1.0
         verts = [(point[i], point[i+1], point[i+2]) for i in range(0, len(point), 3)]
+
         strip = []
         def flush(strip):
-            if len(strip) < 3: return
+            if len(strip) < 3:
+                return
             for i in range(2, len(strip)):
                 a = verts[strip[i-2]]
                 b = verts[strip[i-1]]
                 c = verts[strip[i]]
                 if (i % 2) == 0:
-                    a,b = b,a
+                    a, b = b, a
                 p0 = GL._project_point(*a)
                 p1 = GL._project_point(*b)
                 p2 = GL._project_point(*c)
                 if p0 and p1 and p2:
-                    GL._fill_triangle_screen(p0, p1, p2, rgb)
+                    GL._raster_triangle(p0, p1, p2, rgb, None, None, base_alpha=alpha)
+
         for idx in index:
             if idx == -1:
                 flush(strip); strip = []
             else:
                 strip.append(int(idx))
-        flush(strip)  # última tira, se não terminou com -1
+        flush(strip)  # última tira
 
 
     
     @staticmethod
     def indexedFaceSet(coord=None, coordIndex=None, colorPerVertex=True, color=None, colorIndex=None,
                     texCoord=None, texCoordIndex=None, colors=None, current_texture=None):
-        
+
         rgb_flat = GL._get_rgb_from_colors(colors or {})
+        alpha = 1.0 - float((colors or {}).get('transparency', 0.0))
+
         verts = []
         if coord:
             verts = [(coord[i], coord[i+1], coord[i+2]) for i in range(0, len(coord), 3)]
 
-        # Suporte simples a paleta por vértice (sem interpolação): pega a cor do 1º vértice da face
-        has_vertex_colors = bool(colorPerVertex and color and colorIndex)
+        # paleta de cores por vértice (0..255)
         vcolors = None
-        if has_vertex_colors:
-            cols = []
+        if color:
+            vc = []
             for i in range(0, len(color), 3):
                 r,g,b = color[i], color[i+1], color[i+2]
                 if 0.0 <= r <= 1.0 and 0.0 <= g <= 1.0 and 0.0 <= b <= 1.0:
-                    cols.append([int(r*255), int(g*255), int(b*255)])
+                    vc.append([int(r*255), int(g*255), int(b*255)])
                 else:
-                    cols.append([int(r), int(g), int(b)])
-            vcolors = cols
+                    vc.append([int(r), int(g), int(b)])
+            vcolors = vc
 
-        # Faces separadas por -1 → triangula em fan (0, i-1, i)
-        if coordIndex:
-            face = []
-            for idx in coordIndex:
-                if idx == -1:
-                    if len(face) >= 3:
-                        for i in range(2, len(face)):
-                            a = verts[face[0]]; b = verts[face[i-1]]; c = verts[face[i]]
-                            p0 = GL._project_point(*a); p1 = GL._project_point(*b); p2 = GL._project_point(*c)
-                            if p0 and p1 and p2:
-                                rgb = vcolors[face[0]] if (has_vertex_colors and vcolors) else rgb_flat
-                                GL._fill_triangle_screen(p0, p1, p2, rgb)
-                    face = []
+        use_ci = bool(colorPerVertex and vcolors and colorIndex)
+
+        # texcoords
+        tcoords = None
+        if texCoord is not None:
+            if isinstance(texCoord, (list, tuple)):
+                arr = texCoord
+            elif hasattr(texCoord, "point"):
+                arr = texCoord.point
+            else:
+                arr = None
+            if arr:
+                tcoords = [(arr[i], arr[i+1]) for i in range(0, len(arr), 2)]
+        use_ti = bool(tcoords is not None and texCoordIndex is not None)
+
+        # handle de textura (pode ser int, lista, dict, etc.)
+        tex_handle = GL._get_texture_handle(current_texture)
+
+        face, fcols, fuvs = [], [], []
+        ci_pos = 0
+        ti_pos = 0
+
+        def flush_face():
+            if len(face) < 3:
+                return
+            for i in range(2, len(face)):
+                i0, i1, i2 = face[0], face[i-1], face[i]
+                a = GL._project_point(*verts[i0])
+                b = GL._project_point(*verts[i1])
+                c = GL._project_point(*verts[i2])
+                if not (a and b and c): 
+                    continue
+
+                # cores nos vértices (opcional)
+                if use_ci and fcols:
+                    c0 = vcolors[fcols[0]]; c1 = vcolors[fcols[i-1]]; c2 = vcolors[fcols[i]]
+                elif colorPerVertex and vcolors:
+                    c0 = vcolors[i0]; c1 = vcolors[i1]; c2 = vcolors[i2]
                 else:
-                    face.append(int(idx))
-            # última face
-            if len(face) >= 3:
-                for i in range(2, len(face)):
-                    a = verts[face[0]]; b = verts[face[i-1]]; c = verts[face[i]]
-                    p0 = GL._project_point(*a); p1 = GL._project_point(*b); p2 = GL._project_point(*c)
-                    if p0 and p1 and p2:
-                        rgb = vcolors[face[0]] if (has_vertex_colors and vcolors) else rgb_flat
-                        GL._fill_triangle_screen(p0, p1, p2, rgb)
+                    c0 = rgb_flat; c1 = None; c2 = None
+
+                # UVs por vértice (opcional)
+                if tex_handle is not None and tcoords is not None:
+                    if use_ti and fuvs:
+                        uv0 = tcoords[fuvs[0]]; uv1 = tcoords[fuvs[i-1]]; uv2 = tcoords[fuvs[i]]
+                    else:
+                        # sem texCoordIndex → segue coordIndex
+                        uv0 = tcoords[i0] if i0 < len(tcoords) else (0.0,0.0)
+                        uv1 = tcoords[i1] if i1 < len(tcoords) else (0.0,0.0)
+                        uv2 = tcoords[i2] if i2 < len(tcoords) else (0.0,0.0)
+                    # modula pela cor de vértice se existir; senão passa None para usar só textura
+                    mod_cols = None if (c1 is None or c2 is None) else [c0, c1, c2]
+                    GL._raster_triangle_tex(a, b, c, uv0, uv1, uv2, tex_handle, mod_cols, base_alpha=alpha)
+                else:
+                    GL._raster_triangle(a, b, c, c0, c1, c2, base_alpha=alpha)
+
+        for idx_i, idx in enumerate(coordIndex or []):
+            # consumimos colorIndex/texCoordIndex em paralelo (incluindo -1)
+            col_idx = None
+            if use_ci and ci_pos < len(colorIndex):
+                col_idx = colorIndex[ci_pos]; ci_pos += 1
+            t_idx = None
+            if use_ti and ti_pos < len(texCoordIndex):
+                t_idx = texCoordIndex[ti_pos]; ti_pos += 1
+
+            if idx == -1:
+                flush_face()
+                face, fcols, fuvs = [], [], []
+                continue
+
+            face.append(int(idx))
+            if use_ci and col_idx is not None and col_idx != -1:
+                fcols.append(int(col_idx))
+            if use_ti and t_idx is not None and t_idx != -1:
+                fuvs.append(int(t_idx))
+
+        print("current_texture:", type(current_texture), current_texture, "handle:", tex_handle)
+        # última face
+        flush_face()
+
+
 
 
     @staticmethod

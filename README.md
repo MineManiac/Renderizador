@@ -45,7 +45,6 @@ Foram implementadas as seguintes funções em `gl.py`:
   `x_screen = (x_ndc*0.5 + 0.5) * (width - 1)`  
   `y_screen = (-y_ndc*0.5 + 0.5) * (height - 1)` (inversão de Y para a tela).
 - **Rasterização** por **função de aresta** (teste baricêntrico por sinal) em coordenadas de tela.
-- **Limitações nesta etapa**: sem z-buffer, sem texturas/transparência e sem anti-aliasing.
 
 ## Como Executar
 Para rodar os exemplos de validação do 1.2:
@@ -75,7 +74,6 @@ Foram implementadas as seguintes funções em `gl.py`:
 - **TriangleStrip**: alternância de winding por paridade mantendo a orientação consistente.
 - **IndexedTriangleStrip**: novas tiras começam em cada **`-1`** do vetor `index`.
 - **IndexedFaceSet**: triangulação **fan** por face; sem recorte/clipping por plano nesta etapa.
-- **Limitações**: **sem** z-buffer, **sem** texturas/transparência, **sem** anti-aliasing.
 
 ## Como Executar
 ```bash
@@ -85,3 +83,38 @@ python3 renderizador/renderizador.py -i docs/exemplos/3D/malhas/tiras/tiras.x3d 
 # Zoom (validação do Viewpoint)
 python3 renderizador/renderizador.py -i docs/exemplos/3D/grafo_de_cena/girando/girando.x3d -w 800 -h 600 -p
 ```
+
+# Projeto 1.4 — Cores, Z-buffer, Transparência e Texturas
+![Cores e Texturas](imgs/projeto14.png)
+
+## Implementações
+Foram implementadas as seguintes funcionalidades em `gl.py`:
+
+- **Interpolação de cores por vértice** (perspectiva-correta) no rasterizador `_raster_triangle` (fallback para cor **flat** quando não há `colorPerVertex`).  
+- **Z-buffer** por subamostra (compatível com **SSAA 2×2**): rejeita fragmentos opacos com `z` maior/igual e grava o depth por subamostra.
+- **Transparência** via **composição “source-over”** (`1 − transparency` do material): pixels **opacos** gravam z; **transparentes** apenas compõem a cor (sem gravar z).
+- **Texturas 2D**:
+  - Carregamento/caching (via `gpu.GPU.load_texture`) em `_get_texture_handle`.
+  - Amostragem com **wrap** infinito e correção de orientação (UV → amostrador) em `_read_tex`.
+  - **Interpolação de UVs perspectiva-correta** e amostragem no rasterizador `_raster_triangle_tex`.
+  - **Modulação** opcional da textura pelas cores por vértice (quando `colorPerVertex`/`colorIndex` existem).
+- **IndexedFaceSet com textura**: suporte a `texCoord`/`texCoordIndex` (consumo paralelo aos índices de coord., respeitando separadores `-1`) e `colorPerVertex`.
+
+## Decisões de Implementação
+- **Pipeline**: `MVP → clip → NDC → viewport`. Guardamos também `invw` por vértice para todas as interpolações **perspectiva-corretas** (cores e UVs).
+- **SSAA 2×2**: offsets fixos `[(0.25,0.25), (0.75,0.25), (0.25,0.75), (0.75,0.75)]`; o **resolve** é média simples por pixel.
+- **Profundidade**: comparamos em **NDC** (near = −1, far = +1) por subamostra. Transparente **não** grava z (ordem de desenho afeta o resultado, como pedido no curso).
+- **Texturas**:
+  - UVs com wrap (frac) e ajuste de orientação para casar com o conjunto de exemplos do curso.
+  - Amostragem **nearest** (sem mipmapping/filtragem — escopo de projetos futuros).
+- **Cores e transparência**:
+  - Cores normalizadas para **0..255**.
+  - `alpha = 1 − transparency` do material. A composição usa “source-over”.
+  
+## Como Executar (validação)
+```bash
+# Cores por vértice (degradê em quadrado)
+python3 renderizador/renderizador.py -i .\docs\exemplos\3D\texturas\texturas\texturas.x3d
+
+# Texturas (vários quadros texturizados)
+python3 renderizador/renderizador.py -i .\docs\exemplos\3D\transparencia\transparente\transparente.x3d
