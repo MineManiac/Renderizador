@@ -1,6 +1,7 @@
 # Renderizador
 
 # Projeto 1.1 — Rasterização 2D
+![Rasterização 2D](imgs/projeto11.png)
 
 ## Implementações
 Foram implementadas as seguintes funções em `gl.py`:
@@ -30,6 +31,7 @@ python3 renderizador/renderizador.py -i docs/exemplos/2D/triangulos/triangulos/t
 
 
 # Projeto 1.2 — Pipeline 3D básico
+![Rasterização 3D](imgs/projeto12.png)
 
 ## Implementações
 Foram implementadas as seguintes funções em `gl.py`:
@@ -57,4 +59,29 @@ python3 renderizador/renderizador.py -i docs/exemplos/3D/malhas/varios_triangs/v
 
 # zoom (testa fieldOfView do Viewpoint)
 python3 renderizador/renderizador.py -i docs/exemplos/3D/malhas/zoom/zoom.x3d -w 800 -h 600 -p
+```
+
+# Projeto 1.3 — Strips e Malhas Indexadas
+![Strips e Malhas Indexadas](imgs/projeto13.png)
+## Implementações
+Foram implementadas as seguintes funções em `gl.py`:
+- **triangleStripSet**: rasteriza **faixas de triângulos** a partir de `point` (lista de vértices xyz) e `stripCount` (tamanho de cada tira), alternando a orientação (winding) a cada triângulo.
+- **indexedTriangleStripSet**: rasteriza **faixas indexadas**; o vetor `index` usa **`-1`** para separar tiras.
+- **indexedFaceSet**: rasteriza **faces indexadas** triangulando por *fan* (`0, i-1, i`) a partir de `coord`/`coordIndex`.  
+  > Suporte simples a `colorPerVertex`: quando houver paleta (`color`/`colorIndex`), é usada cor **flat por face** (a do primeiro vértice da face).
+
+## Decisões de Implementação
+- Reuso do pipeline do 1.2: `MVP → NDC → viewport`, com preenchimento via **função de aresta** (baricêntricas por sinal) em coordenadas de tela.
+- **TriangleStrip**: alternância de winding por paridade mantendo a orientação consistente.
+- **IndexedTriangleStrip**: novas tiras começam em cada **`-1`** do vetor `index`.
+- **IndexedFaceSet**: triangulação **fan** por face; sem recorte/clipping por plano nesta etapa.
+- **Limitações**: **sem** z-buffer, **sem** texturas/transparência, **sem** anti-aliasing.
+
+## Como Executar
+```bash
+# Strips / várias faces
+python3 renderizador/renderizador.py -i docs/exemplos/3D/malhas/tiras/tiras.x3d -w 800 -h 600 -p
+
+# Zoom (validação do Viewpoint)
+python3 renderizador/renderizador.py -i docs/exemplos/3D/grafo_de_cena/girando/girando.x3d -w 800 -h 600 -p
 ```
