@@ -20,8 +20,8 @@ import gpu          # Simula os recursos de uma GPU
 import x3d          # Faz a leitura do arquivo X3D, gera o grafo de cena e faz traversal
 import scenegraph   # Imprime o grafo de cena no console
 
-LARGURA = 60  # Valor padrão para largura da tela
-ALTURA = 40   # Valor padrão para altura da tela
+LARGURA = 600  # Valor padrão para largura da tela
+ALTURA = 400   # Valor padrão para altura da tela
 
 
 class Renderizador:

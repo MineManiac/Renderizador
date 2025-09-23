@@ -23,6 +23,113 @@ class GL:
     height = 600  # altura da tela
     near = 0.01   # plano de corte próximo
     far = 1000    # plano de corte distante
+    # === Projeto 1.2 (helpers & state) ===
+    # Estados do pipeline 3D
+    _model_stack = [  # pilha de matrizes de modelo
+        [1,0,0,0,
+         0,1,0,0,
+         0,0,1,0,
+         0,0,0,1]
+    ]
+    _view = [1,0,0,0,
+             0,1,0,0,
+             0,0,1,0,
+             0,0,0,1]
+    _proj = [1,0,0,0,
+             0,1,0,0,
+             0,0,1,0,
+             0,0,0,1]
+    
+    # --- Matrizes 4x4 em arranjo linha-continua (row-major) ---
+    @staticmethod
+    def _m4_mul(a, b):
+        c = [0]*16
+        for r in range(4):
+            for cidx in range(4):
+                c[4*r+cidx] = (a[4*r+0]*b[0+cidx] +
+                               a[4*r+1]*b[4*1+cidx] +
+                               a[4*r+2]*b[4*2+cidx] +
+                               a[4*r+3]*b[4*3+cidx])
+        return c
+    
+    @staticmethod
+    def _m4_vec(a, v):
+        # v: [x,y,z,w]
+        return [
+            a[0]*v[0] + a[1]*v[1] + a[2]*v[2] + a[3]*v[3],
+            a[4]*v[0] + a[5]*v[1] + a[6]*v[2] + a[7]*v[3],
+            a[8]*v[0] + a[9]*v[1] + a[10]*v[2] + a[11]*v[3],
+            a[12]*v[0] + a[13]*v[1] + a[14]*v[2] + a[15]*v[3],
+        ]
+    
+    @staticmethod
+    def _m4_identity():
+        return [1,0,0,0,
+                0,1,0,0,
+                0,0,1,0,
+                0,0,0,1]
+    
+    @staticmethod
+    def _m4_translation(tx,ty,tz):
+        return [1,0,0,tx,
+                0,1,0,ty,
+                0,0,1,tz,
+                0,0,0,1]
+    
+    @staticmethod
+    def _m4_scale(sx,sy,sz):
+        return [sx,0, 0, 0,
+                0, sy,0, 0,
+                0, 0, sz,0,
+                0, 0, 0, 1]
+    
+    @staticmethod
+    def _m4_rotation_axis_angle(ax, ay, az, t):
+        # normaliza eixo
+        import math
+        l = math.sqrt(ax*ax + ay*ay + az*az) or 1.0
+        x, y, z = ax/l, ay/l, az/l
+        c = math.cos(t); s = math.sin(t); ic = 1.0 - c
+        # matriz 3x3 embutida em 4x4
+        return [x*x*ic + c,     x*y*ic - z*s, x*z*ic + y*s, 0,
+                y*x*ic + z*s,   y*y*ic + c,   y*z*ic - x*s, 0,
+                z*x*ic - y*s,   z*y*ic + x*s, z*z*ic + c,   0,
+                0,              0,            0,            1]
+    
+    @staticmethod
+    def _m4_inverse_rigid(mat):
+        # inverte uma matriz rígida T*R (sem escala não-uniforme)
+        # extrai R (3x3) e t (3x1)
+        R = [mat[0],mat[1],mat[2],
+             mat[4],mat[5],mat[6],
+             mat[8],mat[9],mat[10]]
+        t = [mat[3], mat[7], mat[11]]
+        # R^-1 = R^T
+        Rt = [R[0],R[3],R[6],
+              R[1],R[4],R[7],
+              R[2],R[5],R[8]]
+        # -R^T t
+        tx = -(Rt[0]*t[0] + Rt[1]*t[1] + Rt[2]*t[2])
+        ty = -(Rt[3]*t[0] + Rt[4]*t[1] + Rt[5]*t[2])
+        tz = -(Rt[6]*t[0] + Rt[7]*t[1] + Rt[8]*t[2])
+        return [Rt[0],Rt[1],Rt[2],tx,
+                Rt[3],Rt[4],Rt[5],ty,
+                Rt[6],Rt[7],Rt[8],tz,
+                0,0,0,1]
+    
+    @staticmethod
+    def _perspective(fovY, aspect, near, far):
+        import math
+        f = 1.0 / math.tan(fovY * 0.5)
+        A = f / aspect
+        B = f
+        C = (far + near) / (near - far)
+        D = (2 * far * near) / (near - far)
+        return [A, 0, 0, 0,
+                0, B, 0, 0,
+                0, 0, C, D,
+                0, 0, -1, 0]
+
 
     def _get_rgb_from_colors(colors):
         # colors may include emissiveColor as float [0..1] or [0..255]
@@ -164,74 +271,112 @@ class GL:
 
     @staticmethod
     def triangleSet(point, colors):
-        """Função usada para renderizar TriangleSet."""
-        # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/rendering.html#TriangleSet
-        # Nessa função você receberá pontos no parâmetro point, esses pontos são uma lista
-        # de pontos x, y, e z sempre na ordem. Assim point[0] é o valor da coordenada x do
-        # primeiro ponto, point[1] o valor y do primeiro ponto, point[2] o valor z da
-        # coordenada z do primeiro ponto. Já point[3] é a coordenada x do segundo ponto e
-        # assim por diante.
-        # No TriangleSet os triângulos são informados individualmente, assim os três
-        # primeiros pontos definem um triângulo, os três próximos pontos definem um novo
-        # triângulo, e assim por diante.
-        # O parâmetro colors é um dicionário com os tipos cores possíveis, você pode assumir
-        # inicialmente, para o TriangleSet, o desenho das linhas com a cor emissiva
-        # (emissiveColor), conforme implementar novos materias você deverá suportar outros
-        # tipos de cores.
+        """Projeto 1.2 — TriangleSet 3D preenchido (constante, sem z-buffer)."""
+        import math
+        rgb = GL._get_rgb_from_colors(colors)
 
-        # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("TriangleSet : pontos = {0}".format(point)) # imprime no terminal pontos
-        print("TriangleSet : colors = {0}".format(colors)) # imprime no terminal as cores
+        def ndc_to_screen(x_ndc, y_ndc):
+            # NDC [-1,1] -> pixel; y cresce para baixo
+            sx = (x_ndc * 0.5 + 0.5) * (GL.width  - 1)
+            sy = (-y_ndc * 0.5 + 0.5) * (GL.height - 1)
+            return sx, sy  # float (vamos fazer floor/ceil na bounding box)
 
-        # Exemplo de desenho de um pixel branco na coordenada 10, 10
-        gpu.GPU.draw_pixel([10, 10], gpu.GPU.RGB8, [255, 255, 255])  # altera pixel
+        def edge(ax, ay, bx, by, cx, cy):
+            # função de aresta orientada
+            return (cy - ay) * (bx - ax) - (cx - ax) * (by - ay)
+
+        assert len(point) % 9 == 0, "TriangleSet: múltiplo de 9 (x,y,z por vértice)"
+        M   = GL._model_stack[-1]
+        VP  = GL._m4_mul(GL._proj, GL._view)
+        MVP = GL._m4_mul(VP, M)
+
+        for i in range(0, len(point), 9):
+            v0 = [point[i+0], point[i+1], point[i+2], 1.0]
+            v1 = [point[i+3], point[i+4], point[i+5], 1.0]
+            v2 = [point[i+6], point[i+7], point[i+8], 1.0]
+
+            # espaço de recorte (clip)
+            c0 = GL._m4_vec(MVP, v0)
+            c1 = GL._m4_vec(MVP, v1)
+            c2 = GL._m4_vec(MVP, v2)
+
+            # evita w=0 (sem clipping por enquanto)
+            if c0[3] == 0 or c1[3] == 0 or c2[3] == 0:
+                continue
+
+            # NDC
+            x0, y0 = c0[0]/c0[3], c0[1]/c0[3]
+            x1, y1 = c1[0]/c1[3], c1[1]/c1[3]
+            x2, y2 = c2[0]/c2[3], c2[1]/c2[3]
+
+            # viewport
+            X0, Y0 = ndc_to_screen(x0, y0)
+            X1, Y1 = ndc_to_screen(x1, y1)
+            X2, Y2 = ndc_to_screen(x2, y2)
+
+            # área; pula degenerado
+            A = edge(X0, Y0, X1, Y1, X2, Y2)
+            if A == 0:
+                continue
+
+            # bounding box (clamp nos limites da tela)
+            xmin = max(0,              int(math.floor(min(X0, X1, X2))))
+            xmax = min(GL.width  - 1,  int(math.ceil (max(X0, X1, X2))))
+            ymin = max(0,              int(math.floor(min(Y0, Y1, Y2))))
+            ymax = min(GL.height - 1,  int(math.ceil (max(Y0, Y1, Y2))))
+
+            # varredura por baricêntricas (edge function)
+            for y in range(ymin, ymax+1):
+                for x in range(xmin, xmax+1):
+                    w0 = edge(X0, Y0, X1, Y1, x, y)
+                    w1 = edge(X1, Y1, X2, Y2, x, y)
+                    w2 = edge(X2, Y2, X0, Y0, x, y)
+                    inside_pos = (w0 >= 0) and (w1 >= 0) and (w2 >= 0)
+                    inside_neg = (w0 <= 0) and (w1 <= 0) and (w2 <= 0)
+                    if inside_pos or inside_neg:
+                        gpu.GPU.draw_pixel([x, y], gpu.GPU.RGB8, rgb)
+
 
     @staticmethod
     def viewpoint(position, orientation, fieldOfView):
-        """Função usada para renderizar (na verdade coletar os dados) de Viewpoint."""
-        # Na função de viewpoint você receberá a posição, orientação e campo de visão da
-        # câmera virtual. Use esses dados para poder calcular e criar a matriz de projeção
-        # perspectiva para poder aplicar nos pontos dos objetos geométricos.
+        """Coleta Viewpoint e constrói view/projection (Projeto 1.2)."""
+        # Camera transform C = T(eye) * R(axis,angle)
+        eye = position or [0.0,0.0,0.0]
+        ax, ay, az, t = orientation if orientation else [0.0,0.0,1.0,0.0]
+        T = GL._m4_translation(eye[0], eye[1], eye[2])
+        R = GL._m4_rotation_axis_angle(ax, ay, az, t)
+        C = GL._m4_mul(T, R)
+        # View is inverse of camera transform (rigid)
+        GL._view = GL._m4_inverse_rigid(C)
+        # Projection
+        aspect = GL.width / GL.height if GL.height else 1.0
+        GL._proj = GL._perspective(fieldOfView, aspect, GL.near, GL.far)
 
-        # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("Viewpoint : ", end='')
-        print("position = {0} ".format(position), end='')
-        print("orientation = {0} ".format(orientation), end='')
-        print("fieldOfView = {0} ".format(fieldOfView))
 
     @staticmethod
     def transform_in(translation, scale, rotation):
-        """Função usada para renderizar (na verdade coletar os dados) de Transform."""
-        # A função transform_in será chamada quando se entrar em um nó X3D do tipo Transform
-        # do grafo de cena. Os valores passados são a escala em um vetor [x, y, z]
-        # indicando a escala em cada direção, a translação [x, y, z] nas respectivas
-        # coordenadas e finalmente a rotação por [x, y, z, t] sendo definida pela rotação
-        # do objeto ao redor do eixo x, y, z por t radianos, seguindo a regra da mão direita.
-        # Quando se entrar em um nó transform se deverá salvar a matriz de transformação dos
-        # modelos do mundo para depois potencialmente usar em outras chamadas. 
-        # Quando começar a usar Transforms dentre de outros Transforms, mais a frente no curso
-        # Você precisará usar alguma estrutura de dados pilha para organizar as matrizes.
-
-        # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("Transform : ", end='')
-        if translation:
-            print("translation = {0} ".format(translation), end='') # imprime no terminal
-        if scale:
-            print("scale = {0} ".format(scale), end='') # imprime no terminal
+        """Empilha Model = Parent * (T * R * S)."""
+        parent = GL._model_stack[-1]
+        # constrói T, R, S
+        tx,ty,tz = (translation if translation else [0.0,0.0,0.0])
+        sx,sy,sz = (scale if scale else [1.0,1.0,1.0])
         if rotation:
-            print("rotation = {0} ".format(rotation), end='') # imprime no terminal
-        print("")
+            rx,ry,rz,ang = rotation
+            R = GL._m4_rotation_axis_angle(rx,ry,rz,ang)
+        else:
+            R = GL._m4_identity()
+        T = GL._m4_translation(tx,ty,tz)
+        S = GL._m4_scale(sx,sy,sz)
+        local = GL._m4_mul(GL._m4_mul(T, R), S)  # T * R * S
+        GL._model_stack.append(GL._m4_mul(parent, local))
+
 
     @staticmethod
     def transform_out():
-        """Função usada para renderizar (na verdade coletar os dados) de Transform."""
-        # A função transform_out será chamada quando se sair em um nó X3D do tipo Transform do
-        # grafo de cena. Não são passados valores, porém quando se sai de um nó transform se
-        # deverá recuperar a matriz de transformação dos modelos do mundo da estrutura de
-        # pilha implementada.
+        """Desempilha a matriz de modelo atual."""
+        if len(GL._model_stack) > 1:
+            GL._model_stack.pop()
 
-        # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("Saindo de Transform")
 
     @staticmethod
     def triangleStripSet(point, stripCount, colors):
