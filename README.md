@@ -111,10 +111,11 @@ Foram implementadas as seguintes funcionalidades em `gl.py`:
   - Cores normalizadas para **0..255**.
   - `alpha = 1 − transparency` do material. A composição usa “source-over”.
   
-## Como Executar (validação)
+## Como Executar
 ```bash
 # Cores por vértice (degradê em quadrado)
 python3 renderizador/renderizador.py -i .\docs\exemplos\3D\texturas\texturas\texturas.x3d
 
 # Texturas (vários quadros texturizados)
 python3 renderizador/renderizador.py -i .\docs\exemplos\3D\transparencia\transparente\transparente.x3d
+```
