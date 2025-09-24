@@ -24,24 +24,6 @@ class GL:
     height = 600  # altura da tela
     near = 0.01   # plano de corte próximo
     far = 1000    # plano de corte distante
-
-    def _get_rgb_from_colors(colors):
-        # colors may include emissiveColor as float [0..1] or [0..255]
-        rgb = colors.get('emissiveColor') or colors.get('diffuseColor') or [1.0, 1.0, 1.0]
-        # normalize to 0..255 ints
-        if isinstance(rgb, (list, tuple)) and len(rgb) >= 3:
-            r,g,b = rgb[:3]
-            # If in 0..1, scale; else assume 0..255
-            if (0.0 <= r <= 1.0) and (0.0 <= g <= 1.0) and (0.0 <= b <= 1.0):
-                r,g,b = int(r*255), int(g*255), int(b*255)
-            else:
-                r,g,b = int(r), int(g), int(b)
-            r = max(0, min(255, r))
-            g = max(0, min(255, g))
-            b = max(0, min(255, b))
-        else:
-            r,g,b = 255,255,255
-        return [r,g,b]
     
     @staticmethod
     def setup(width, height, near=0.01, far=1000):
@@ -116,7 +98,6 @@ class GL:
 
     @staticmethod
     def _m4_rotation_axis_angle(ax, ay, az, t):
-        import math
         l = math.sqrt(ax*ax + ay*ay + az*az) or 1.0
         x, y, z = ax/l, ay/l, az/l
         c = math.cos(t); s = math.sin(t); ic = 1.0 - c
@@ -142,8 +123,8 @@ class GL:
                 Rt[3],Rt[4],Rt[5],ty,
                 Rt[6],Rt[7],Rt[8],tz,
                 0,0,0,1]
+    
 # --- 3x3 helpers para normais -----------------------------------------------
-
     @staticmethod
     def _m4_mul_3x3_vec(m, v):
         """
@@ -221,13 +202,59 @@ class GL:
         return [inv[0],inv[3],inv[6],
                 inv[1],inv[4],inv[7],
                 inv[2],inv[5],inv[8]]
+    
+    @staticmethod
+    def _normalize3(v):
+        """ normaliza vetor 3D (x,y,z) """
+        x,y,z = v[0], v[1], v[2]
+        n = math.sqrt(x*x + y*y + z*z)
+        if n == 0: return [0.0,0.0,1.0]
+        return [x/n, y/n, z/n]
+
+    @staticmethod
+    def _dot(a,b): return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+
+    @staticmethod
+    def _sub(a,b): return [a[0]-b[0], a[1]-b[1], a[2]-b[2]]
+
+    @staticmethod
+    def _cross(a,b):
+        return [a[1]*b[2]-a[2]*b[1],
+                a[2]*b[0]-a[0]*b[2],
+                a[0]*b[1]-a[1]*b[0]]
+
+    @staticmethod
+    def _inverse_transpose_3x3_of(m4):
+        # m4 é 4x4 row-major; pega 3x3, inverte e transpõe (normal matrix)
+        a = [[m4[0],m4[1],m4[2]],
+            [m4[4],m4[5],m4[6]],
+            [m4[8],m4[9],m4[10]]]
+        # inversa 3x3
+        det = (a[0][0]*(a[1][1]*a[2][2]-a[1][2]*a[2][1]) -
+            a[0][1]*(a[1][0]*a[2][2]-a[1][2]*a[2][0]) +
+            a[0][2]*(a[1][0]*a[2][1]-a[1][1]*a[2][0]))
+        if abs(det) < 1e-8:
+            return [1,0,0, 0,1,0, 0,0,1]
+        invdet = 1.0/det
+        m00 = (a[1][1]*a[2][2]-a[1][2]*a[2][1])*invdet
+        m01 = (a[0][2]*a[2][1]-a[0][1]*a[2][2])*invdet
+        m02 = (a[0][1]*a[1][2]-a[0][2]*a[1][1])*invdet
+        m10 = (a[1][2]*a[2][0]-a[1][0]*a[2][2])*invdet
+        m11 = (a[0][0]*a[2][2]-a[0][2]*a[2][0])*invdet
+        m12 = (a[0][2]*a[1][0]-a[0][0]*a[1][2])*invdet
+        m20 = (a[1][0]*a[2][1]-a[1][1]*a[2][0])*invdet
+        m21 = (a[0][1]*a[2][0]-a[0][0]*a[2][1])*invdet
+        m22 = (a[0][0]*a[1][1]-a[0][1]*a[1][0])*invdet
+        # transposta da inversa
+        return [m00, m10, m20,
+                m01, m11, m21,
+                m02, m12, m22]
 
     @staticmethod
     def _normal_matrix():
         """
-        Matriz para transformar normais em view space:
-        N = (MV_3x3)^{-T}. Se só houver rotações/translações/escala uniforme,
-        funciona também usar direto MV_3x3; aqui uso a forma geral.
+        Matriz para transformar normais em view space
+
         """
         M  = GL._model_stack[-1]
         MV = GL._m4_mul(GL._view, M)
@@ -237,7 +264,7 @@ class GL:
 
     @staticmethod
     def _perspective(fovY, aspect, near, far):
-        import math
+        "Cria matriz de projeção perspectiva (fovY em radianos)."
         f = 1.0 / math.tan(fovY * 0.5)
         A = f / aspect
         B = f
@@ -250,6 +277,7 @@ class GL:
     
     @staticmethod
     def _project_point(x, y, z):
+        "projeção de um vértice 3D para coordenadas de tela."
         v = [x, y, z, 1.0]
         M   = GL._model_stack[-1]
         VP  = GL._m4_mul(GL._proj, GL._view)
@@ -265,7 +293,7 @@ class GL:
 
     @staticmethod
     def _project_point4(x, y, z):
-        """Retorna (sx, sy, z_ndc, inv_w, posVS)"""
+        """projeção de um vértice 3D para coordenadas de tela, também Retorna z_ndc, inv_w, posVS para interpolação e iluminação.)"""
         v = [x, y, z, 1.0]
         M = GL._model_stack[-1]
         MV = GL._m4_mul(GL._view, M)
@@ -288,7 +316,9 @@ class GL:
 
     @staticmethod
     def _fill_triangle_screen(p0, p1, p2, rgb):
-        # compat: chama o raster novo com cor flat
+        """
+        Preenche triângulos 2D (Projeto 1.1).
+        """
         GL._raster_triangle(p0, p1, p2, rgb, None, None, base_alpha=1.0)
 
 # --- estado de frame, zbuffer e composição ---
@@ -325,7 +355,8 @@ class GL:
     
     @staticmethod
     def _resolve_pixel(px, py):
-        """Média das subamostras para o framebuffer e escreve na GPU."""
+        """Média das subamostras para o framebuffer e escreve na GPU. 
+        Chamar após alterar todas as subamostras de um pixel."""
         n = GL._ssaa * GL._ssaa
         acc_r = acc_g = acc_b = 0.0
         for s in range(n):
@@ -338,7 +369,7 @@ class GL:
     
     @staticmethod
     def _blend_over(src_rgb, src_a, dst_rgba):
-        """Composição 'source over' em 0..255; dst_rgba = [r,g,b,a] (a em [0..1])."""
+        """Composição 'source over' em 0..255; dst_rgba = [r,g,b,a] (a em [0..1]). """
         a = max(0.0, min(1.0, float(src_a)))
         inv = 1.0 - a
         out_r = src_rgb[0]*a + dst_rgba[0]*inv
@@ -356,12 +387,11 @@ class GL:
                                                     int(max(0, min(255, b)))])
 
     @staticmethod
-    def _raster_triangle(v0, v1, v2, c0, c1, c2, base_alpha=1.0):
+    def _raster_triangle(v0, v1, v2, c0, c1, c2, base_alpha=1.0): #preenche um triângulo na tela fazendo interpolação perspectiva-correta
         """
         v* = (sx, sy, z_ndc, invw)
         c* = [r,g,b] por vértice (0..255) ou None (usa flat via c0)
         """
-        import math
         X0,Y0,Z0,iw0 = v0; X1,Y1,Z1,iw1 = v1; X2,Y2,Z2,iw2 = v2
 
         def edge(ax, ay, bx, by, cx, cy):
@@ -434,6 +464,9 @@ class GL:
     # --- tex ---
     @staticmethod
     def _read_tex(tex_handle, u, v):
+        """
+        Lê uma texel da textura em (u, v) [0..1].
+        """
         import math, numpy as _np
         # wrap
         u = u - math.floor(u)
@@ -477,7 +510,7 @@ class GL:
         if isinstance(current_texture, _np.ndarray):
             return current_texture
 
-        # 2) extrai uma 'key' (caminho) de estruturas comuns do X3D
+        # 2) extrai uma 'key' de estruturas comuns do X3D
         key = None
         if isinstance(current_texture, (list, tuple)) and current_texture:
             # prioriza um handle inteiro; senão primeira string
@@ -523,7 +556,7 @@ class GL:
         uv* = (u, v)
         mod_colors: lista [(r,g,b) 0..255] por vértice OU None (usa só textura).
         """
-        import math
+
         X0,Y0,Z0,iw0 = v0; X1,Y1,Z1,iw1 = v1; X2,Y2,Z2,iw2 = v2
         U0,V0 = uv0; U1,V1 = uv1; U2,V2 = uv2
 
@@ -601,9 +634,8 @@ class GL:
     @staticmethod
     def _ensure_camera_and_frame():
         """Garante uma câmera/projeção padrão e buffers prontos caso Viewpoint não tenha sido chamado."""
-        # Se _proj ainda parece identidade, criamos uma perspective padrão + view ‘olhando’ para a origem
+        # Se _proj ainda parece identidade, criamos uma perspective padrão + view para a origem
         if not getattr(GL, "_default_cam_set", False):
-            # heurística simples para detectar identidade: elementos [0,0]=1,[5]=1,[10]=1,[15]=1
             if (GL._proj[0] == 1 and GL._proj[5] == 1 and GL._proj[10] == 1 and GL._proj[15] == 1):
                 # câmera default: eye=(0,0,5), sem rotação, fov ~ 60°
                 GL.viewpoint([0.0, 0.0, 5.0], [0.0, 0.0, 1.0, 0.0], math.radians(60.0))
@@ -626,60 +658,43 @@ class GL:
         b = 0.0 if b < 0.0 else (1.0 if b > 1.0 else b)
         return [r, g, b]
     
+    @staticmethod
+    def _get_rgb_from_colors(colors):
+        """Extrai [r,g,b] 0..255 de um dicionário de cores (emissivo, difuso, etc)."""
+        rgb = colors.get('emissiveColor') or colors.get('diffuseColor') or [1.0, 1.0, 1.0]
+        if isinstance(rgb, (list, tuple)) and len(rgb) >= 3:
+            r,g,b = rgb[:3]
+            if (0.0 <= r <= 1.0) and (0.0 <= g <= 1.0) and (0.0 <= b <= 1.0):
+                r,g,b = int(r*255), int(g*255), int(b*255)
+            else:
+                r,g,b = int(r), int(g), int(b)
+            r = max(0, min(255, r))
+            g = max(0, min(255, g))
+            b = max(0, min(255, b))
+        else:
+            r,g,b = 255,255,255
+        return [r,g,b]
+    
 # ====================== iluminação =================
     _headlight = False
     _dir_lights = []   # cada item: { 'ambient': float, 'color': (r,g,b), 'intensity': float, 'dir': (x,y,z) } em VIEW space
     _point_lights = [] # idem com 'pos': (x,y,z)
     _ambient_global = 0.0  # ambient mínimo para não ficar tudo preto
 
-    @staticmethod
-    def _normalize3(v):
-        x,y,z = v[0], v[1], v[2]
-        n = math.sqrt(x*x + y*y + z*z)
-        if n == 0: return [0.0,0.0,1.0]
-        return [x/n, y/n, z/n]
-
-    @staticmethod
-    def _dot(a,b): return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
-
-    @staticmethod
-    def _sub(a,b): return [a[0]-b[0], a[1]-b[1], a[2]-b[2]]
-
-    @staticmethod
-    def _cross(a,b):
-        return [a[1]*b[2]-a[2]*b[1],
-                a[2]*b[0]-a[0]*b[2],
-                a[0]*b[1]-a[1]*b[0]]
-
-    @staticmethod
-    def _inverse_transpose_3x3_of(m4):
-        # m4 é 4x4 row-major; pega 3x3, inverte e transpõe (normal matrix)
-        a = [[m4[0],m4[1],m4[2]],
-            [m4[4],m4[5],m4[6]],
-            [m4[8],m4[9],m4[10]]]
-        # inversa 3x3
-        det = (a[0][0]*(a[1][1]*a[2][2]-a[1][2]*a[2][1]) -
-            a[0][1]*(a[1][0]*a[2][2]-a[1][2]*a[2][0]) +
-            a[0][2]*(a[1][0]*a[2][1]-a[1][1]*a[2][0]))
-        if abs(det) < 1e-8:
-            return [1,0,0, 0,1,0, 0,0,1]
-        invdet = 1.0/det
-        m00 = (a[1][1]*a[2][2]-a[1][2]*a[2][1])*invdet
-        m01 = (a[0][2]*a[2][1]-a[0][1]*a[2][2])*invdet
-        m02 = (a[0][1]*a[1][2]-a[0][2]*a[1][1])*invdet
-        m10 = (a[1][2]*a[2][0]-a[1][0]*a[2][2])*invdet
-        m11 = (a[0][0]*a[2][2]-a[0][2]*a[2][0])*invdet
-        m12 = (a[0][2]*a[1][0]-a[0][0]*a[1][2])*invdet
-        m20 = (a[1][0]*a[2][1]-a[1][1]*a[2][0])*invdet
-        m21 = (a[0][1]*a[2][0]-a[0][0]*a[2][1])*invdet
-        m22 = (a[0][0]*a[1][1]-a[0][1]*a[1][0])*invdet
-        # transposta da inversa
-        return [m00, m10, m20,
-                m01, m11, m21,
-                m02, m12, m22]
+    # estado simples de luz
+    _lights = {
+        "headlight": True,
+        "dir": [0.0, 0.0, -1.0],  # em view space quando headlight
+        "color": [1.0, 1.0, 1.0],
+        "intensity": 1.0,
+        "ambientIntensity": 0.15,  # um mínimo para não ficar tudo preto
+    }
 
     @staticmethod
     def _project_point_full(x, y, z):
+        """
+        Projeção de um vértice 3D para coordenadas de tela, retornando também z_ndc, inv_w e posVS (view space) para interpolação e iluminação.
+        """
         # Retorna: (sx, sy, z_ndc, invw, [vx, vy, vz] em view space)
         v = [x, y, z, 1.0]
 
@@ -705,6 +720,9 @@ class GL:
 
     @staticmethod
     def _shade_vertex(posVS, normalVS, material):
+        """
+        Calcula iluminação de um vértice em view space (Phong/Blinn-Phong).
+        """
         def norm(v):
             l = math.sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]) or 1.0
             return [v[0]/l, v[1]/l, v[2]/l]
@@ -757,10 +775,12 @@ class GL:
                 int(max(0,min(255, rgb[1]*255))),
                 int(max(0,min(255, rgb[2]*255)))]
     
+    
+    
 # ====================== 1.1: RASTER 2D =================
     @staticmethod
     def polypoint2D(point, colors):
-        """Função usada para renderizar Polypoint2D (Projeto 1.1)."""
+        """Função usada para renderizar Polypoint2D."""
         # Espera-se pares [x0,y0, x1,y1, ...]
         rgb = GL._get_rgb_from_colors(colors)
         # Desenha cada ponto
@@ -824,8 +844,7 @@ class GL:
 
     @staticmethod    
     def triangleSet2D(vertices, colors):
-        """Preenche triângulos 2D (Projeto 1.1)."""
-        import math
+        """Preenche triângulos 2D """ 
         # usa emissiveColor; se vier em [0..1], converte pra [0..255]
         rgb = colors.get('emissiveColor') or colors.get('diffuseColor') or [1.0, 1.0, 1.0]
         if all(0.0 <= c <= 1.0 for c in rgb[:3]):
@@ -891,7 +910,7 @@ class GL:
         MV = GL._m4_mul(GL._view, GL._model_stack[-1])
         Nmat = GL._m3_inv_transpose_from_m4(MV)
 
-        def area2(p0, p1, p2):
+        def area2(p0, p1, p2): # área * 2 (det) em tela (sx,sy)
             return (p1[0]-p0[0])*(p2[1]-p0[1]) - (p1[1]-p0[1])*(p2[0]-p0[0])
 
         for i in range(0, len(point), 9):
@@ -1012,6 +1031,7 @@ class GL:
     
     @staticmethod
     def triangleStripSet(point, stripCount, colors):
+        """vários triângulos são formados a partir de uma única sequência de vértices, reaproveitando os dois últimos vértices do triângulo anterior"""
         GL._ensure_camera_and_frame()
         rgb = GL._get_rgb_from_colors(colors)
         alpha = 1.0 - float(colors.get('transparency', 0.0)) if isinstance(colors, dict) else 1.0
@@ -1039,6 +1059,7 @@ class GL:
 # ====================== 1.3: STRIPS / INDEXADOS / FACESET ===============
     @staticmethod
     def indexedTriangleStripSet(point, index, colors):
+        """Variante indexada: IndexedTriangleStripSet, onde um vetor index (com -1 separando tiras) referencia a lista de vértices"""
         GL._ensure_camera_and_frame()
         rgb = GL._get_rgb_from_colors(colors)
         alpha = 1.0 - float(colors.get('transparency', 0.0)) if isinstance(colors, dict) else 1.0
@@ -1072,6 +1093,7 @@ class GL:
     @staticmethod
     def indexedFaceSet(coord=None, coordIndex=None, colorPerVertex=True, color=None, colorIndex=None,
                     texCoord=None, texCoordIndex=None, colors=None, current_texture=None):
+        """Descreve uma malha por lista de vértices e lista de índices que formam faces (polígonos), com possibilidade de cores/UVs por vértice ou por face"""
 
         GL._ensure_camera_and_frame()
         verts = []
@@ -1079,7 +1101,6 @@ class GL:
             verts = [(coord[i], coord[i+1], coord[i+2]) for i in range(0, len(coord), 3)]
 
         # (opcional) paleta de cores por vértice, mas usaremos principalmente material/luz
-        # deixo como está se você já usa, não é obrigatório para difusos.
 
         MV = GL._m4_mul(GL._view, GL._model_stack[-1])
         Nmat = GL._m3_inv_transpose_from_m4(MV)
@@ -1193,7 +1214,7 @@ class GL:
             Renderiza uma esfera centrada na origem usando latitude/longitude.
             Usa shading por vértice com a sua _shade_vertex (difuso+spec).
             """
-            # qualidade (aumente/diminua conforme o FPS desejado)
+            # qualidade
             stacks = 10   # linhas de latitude (>= 2)
             slices = 16   # colunas de longitude (>= 3)
 
@@ -1201,7 +1222,6 @@ class GL:
             if r <= 0:
                 return
 
-            import math
             # Matrizes para transformar normais ao espaço de visualização
             MV   = GL._m4_mul(GL._view, GL._model_stack[-1])
             Nmat = GL._m3_inv_transpose_from_m4(MV)
@@ -1209,7 +1229,7 @@ class GL:
             def area2(p0, p1, p2):
                 return (p1[0]-p0[0])*(p2[1]-p0[1]) - (p1[1]-p0[1])*(p2[0]-p0[0])
 
-            # Gera “anéis” (stacks) de latitude de -pi/2..+pi/2
+            # Gera “anéis” 
             for i in range(stacks):
                 # phi: latitude inferior e superior
                 phi0 = math.pi * (-0.5 + i    / stacks)
@@ -1243,7 +1263,6 @@ class GL:
                         continue
 
                     # Normais no espaço do objeto ≈ posição normalizada (esfera)
-                    # Depois levamos para VIEW space com a normal matrix.
                     def n_view(x,y,z):
                         # normal objeto
                         ln = math.sqrt(x*x + y*y + z*z) or 1.0
@@ -1310,15 +1329,6 @@ class GL:
         print("Cylinder : height = {0}".format(height)) # imprime no terminal a altura do cilindro
         print("Cylinder : colors = {0}".format(colors)) # imprime no terminal as cores
 
-    
-    # estado simples de luz (já existia algo? mantenha, só garanta essas chaves)
-    _lights = {
-        "headlight": True,
-        "dir": [0.0, 0.0, -1.0],  # em view space quando headlight
-        "color": [1.0, 1.0, 1.0],
-        "intensity": 1.0,
-        "ambientIntensity": 0.15,  # um mínimo para não ficar tudo preto
-    }
 
     @staticmethod
     def navigationInfo(headlight):
@@ -1545,7 +1555,6 @@ class GL:
             denom = (K[i+1] - K[i]) or 1e-8
             u = (f - K[i]) / denom
 
-        import math
 
         def axis_angle_to_q(ax, ay, az, ang):
             n = math.sqrt(ax*ax + ay*ay + az*az) or 1.0
