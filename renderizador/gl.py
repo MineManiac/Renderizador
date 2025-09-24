@@ -68,6 +68,9 @@ class GL:
              0,1,0,0,
              0,0,1,0,
              0,0,0,1]
+    
+    _default_cam_set = False
+
 
     @staticmethod
     def _m4_mul(a, b):
@@ -595,6 +598,34 @@ class GL:
 
                 GL._resolve_pixel(px, py)
 
+    @staticmethod
+    def _ensure_camera_and_frame():
+        """Garante uma câmera/projeção padrão e buffers prontos caso Viewpoint não tenha sido chamado."""
+        # Se _proj ainda parece identidade, criamos uma perspective padrão + view ‘olhando’ para a origem
+        if not getattr(GL, "_default_cam_set", False):
+            # heurística simples para detectar identidade: elementos [0,0]=1,[5]=1,[10]=1,[15]=1
+            if (GL._proj[0] == 1 and GL._proj[5] == 1 and GL._proj[10] == 1 and GL._proj[15] == 1):
+                # câmera default: eye=(0,0,5), sem rotação, fov ~ 60°
+                GL.viewpoint([0.0, 0.0, 5.0], [0.0, 0.0, 1.0, 0.0], math.radians(60.0))
+                GL._default_cam_set = True
+        # Se buffers ainda não foram criados, inicializa um frame
+        if GL._zbuf_sub is None or GL._cbuf is None:
+            GL._begin_frame()
+
+    @staticmethod
+    def _to01(c):
+        """Converte [r,g,b] que podem estar em [0..1] ou [0..255] para floats [0..1]."""
+        if c is None:
+            return [1.0, 1.0, 1.0]
+        r, g, b = (float(c[0]), float(c[1]), float(c[2]))
+        if max(r, g, b) > 1.0:
+            r /= 255.0; g /= 255.0; b /= 255.0
+        # clamp
+        r = 0.0 if r < 0.0 else (1.0 if r > 1.0 else r)
+        g = 0.0 if g < 0.0 else (1.0 if g > 1.0 else g)
+        b = 0.0 if b < 0.0 else (1.0 if b > 1.0 else b)
+        return [r, g, b]
+    
 # ====================== iluminação =================
     _headlight = False
     _dir_lights = []   # cada item: { 'ambient': float, 'color': (r,g,b), 'intensity': float, 'dir': (x,y,z) } em VIEW space
@@ -855,6 +886,7 @@ class GL:
         # (emissiveColor), conforme implementar novos materias você deverá suportar outros
         # tipos de cores.
 
+        GL._ensure_camera_and_frame()
         assert len(point) % 9 == 0, "TriangleSet espera múltiplos de 9"
         MV = GL._m4_mul(GL._view, GL._model_stack[-1])
         Nmat = GL._m3_inv_transpose_from_m4(MV)
@@ -873,8 +905,12 @@ class GL:
             if not (p0 and p1 and p2): 
                 continue
 
-            # back-face culling em tela
-            if area2(p0, p1, p2) >= 0:
+            material = colors or {}
+            em = material.get("emissiveColor", [0.0, 0.0, 0.0])
+            is_emissive = any(c > 0 for c in (em[:3] if isinstance(em, (list, tuple)) else [0,0,0]))
+
+            # só fazemos culling quando NÃO for emissivo
+            if (not is_emissive) and area2(p0, p1, p2) >= 0:
                 continue
 
             # normal por face no WORLD → transforma para VIEW pela Nmat
@@ -925,6 +961,14 @@ class GL:
         # limpar estado de luzes a cada frame
         GL._dir_lights = []
         GL._point_lights = []
+
+        # luz padrão caso a cena não informe nenhuma nesta iteração
+        GL._lights = getattr(GL, "_lights", {})
+        if "headlight" not in GL._lights and "dir_world" not in GL._lights:
+            GL._lights["headlight"] = True            # liga o headlight
+            GL._lights["ambientIntensity"] = 0.20     # um pouco de ambiente
+            GL._lights["color"] = [1.0, 1.0, 1.0]
+            GL._lights["intensity"] = 1.0
     
 
     @staticmethod
@@ -967,6 +1011,7 @@ class GL:
     
     @staticmethod
     def triangleStripSet(point, stripCount, colors):
+        GL._ensure_camera_and_frame()
         rgb = GL._get_rgb_from_colors(colors)
         alpha = 1.0 - float(colors.get('transparency', 0.0)) if isinstance(colors, dict) else 1.0
         verts = [(point[i], point[i+1], point[i+2]) for i in range(0, len(point), 3)]
@@ -993,6 +1038,7 @@ class GL:
 # ====================== 1.3: STRIPS / INDEXADOS / FACESET ===============
     @staticmethod
     def indexedTriangleStripSet(point, index, colors):
+        GL._ensure_camera_and_frame()
         rgb = GL._get_rgb_from_colors(colors)
         alpha = 1.0 - float(colors.get('transparency', 0.0)) if isinstance(colors, dict) else 1.0
         verts = [(point[i], point[i+1], point[i+2]) for i in range(0, len(point), 3)]
@@ -1026,6 +1072,7 @@ class GL:
     def indexedFaceSet(coord=None, coordIndex=None, colorPerVertex=True, color=None, colorIndex=None,
                     texCoord=None, texCoordIndex=None, colors=None, current_texture=None):
 
+        GL._ensure_camera_and_frame()
         verts = []
         if coord:
             verts = [(coord[i], coord[i+1], coord[i+2]) for i in range(0, len(coord), 3)]
@@ -1054,7 +1101,7 @@ class GL:
                         if not (p0 and p1 and p2):
                             continue
 
-                        if area2(p0,p1,p2) <= 0:
+                        if area2(p0,p1,p2) >= 0:
                             continue
 
                         # normal de face em WORLD → VIEW
@@ -1139,9 +1186,96 @@ class GL:
         # precisar tesselar ela em triângulos, para isso encontre os vértices e defina
         # os triângulos.
 
-        # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("Sphere : radius = {0}".format(radius)) # imprime no terminal o raio da esfera
-        print("Sphere : colors = {0}".format(colors)) # imprime no terminal as cores
+        @staticmethod
+        def sphere(radius, colors):
+            """
+            Renderiza uma esfera centrada na origem usando latitude/longitude.
+            Usa shading por vértice com a sua _shade_vertex (difuso+spec).
+            """
+            # qualidade (aumente/diminua conforme o FPS desejado)
+            stacks = 10   # linhas de latitude (>= 2)
+            slices = 16   # colunas de longitude (>= 3)
+
+            r = float(radius)
+            if r <= 0:
+                return
+
+            import math
+            # Matrizes para transformar normais ao espaço de visualização
+            MV   = GL._m4_mul(GL._view, GL._model_stack[-1])
+            Nmat = GL._m3_inv_transpose_from_m4(MV)
+
+            def area2(p0, p1, p2):
+                return (p1[0]-p0[0])*(p2[1]-p0[1]) - (p1[1]-p0[1])*(p2[0]-p0[0])
+
+            # Gera “anéis” (stacks) de latitude de -pi/2..+pi/2
+            for i in range(stacks):
+                # phi: latitude inferior e superior
+                phi0 = math.pi * (-0.5 + i    / stacks)
+                phi1 = math.pi * (-0.5 + (i+1)/ stacks)
+                y0   = r * math.sin(phi0)
+                y1   = r * math.sin(phi1)
+                rc0  = r * math.cos(phi0)
+                rc1  = r * math.cos(phi1)
+
+                for j in range(slices):
+                    # theta: longitude
+                    theta0 = 2.0*math.pi * ( j    / slices)
+                    theta1 = 2.0*math.pi * ((j+1) / slices)
+
+                    x00 = rc0*math.cos(theta0); z00 = rc0*math.sin(theta0)
+                    x01 = rc0*math.cos(theta1); z01 = rc0*math.sin(theta1)
+                    x10 = rc1*math.cos(theta0); z10 = rc1*math.sin(theta0)
+                    x11 = rc1*math.cos(theta1); z11 = rc1*math.sin(theta1)
+
+                    A = (x00, y0, z00)
+                    B = (x10, y1, z10)
+                    C = (x11, y1, z11)
+                    D = (x01, y0, z01)
+
+                    # Projetamos cada vértice e pegamos posVS para o shader
+                    pA = GL._project_point4(*A)
+                    pB = GL._project_point4(*B)
+                    pC = GL._project_point4(*C)
+                    pD = GL._project_point4(*D)
+                    if not (pA and pB and pC and pD):
+                        continue
+
+                    # Normais no espaço do objeto ≈ posição normalizada (esfera)
+                    # Depois levamos para VIEW space com a normal matrix.
+                    def n_view(x,y,z):
+                        # normal objeto
+                        ln = math.sqrt(x*x + y*y + z*z) or 1.0
+                        n  = [x/ln, y/ln, z/ln]
+                        return GL._m3_mul_vec(Nmat, n)
+
+                    nA = n_view(*A)
+                    nB = n_view(*B)
+                    nC = n_view(*C)
+                    nD = n_view(*D)
+
+                    # Cores por vértice via shader de iluminação
+                    cA = GL._shade_vertex(pA[4], nA, colors or {})
+                    cB = GL._shade_vertex(pB[4], nB, colors or {})
+                    cC = GL._shade_vertex(pC[4], nC, colors or {})
+                    cD = GL._shade_vertex(pD[4], nD, colors or {})
+
+                    # Dois triângulos por quad (A-B-C) e (A-C-D)
+                    # Faz culling pela orientação em tela para evitar excesso de fill
+                    if area2(pA, pB, pC) < 0:
+                        GL._raster_triangle(
+                            (pA[0],pA[1],pA[2],pA[3]),
+                            (pB[0],pB[1],pB[2],pB[3]),
+                            (pC[0],pC[1],pC[2],pC[3]),
+                            cA, cB, cC, base_alpha=1.0
+                        )
+                    if area2(pA, pC, pD) < 0:
+                        GL._raster_triangle(
+                            (pA[0],pA[1],pA[2],pA[3]),
+                            (pC[0],pC[1],pC[2],pC[3]),
+                            (pD[0],pD[1],pD[2],pD[3]),
+                            cA, cC, cD, base_alpha=1.0
+                        )
 
     @staticmethod
     def cone(bottomRadius, height, colors):
@@ -1196,13 +1330,6 @@ class GL:
         # ambientIntensity = 0,0 e direção = (0 0 −1).
 
         GL._lights["headlight"] = bool(headlight)
-        if GL._lights["headlight"]:
-            GL._lights.update({
-                "color": [1.0, 1.0, 1.0],
-                "intensity": 1.0,
-                "ambientIntensity": 0.0,  # headlight deve ter ambient = 0
-            })
-            GL._lights.pop("dir_world", None)  # força usar headlight
 
     @staticmethod
     def directionalLight(ambientIntensity, color, intensity, direction):
@@ -1216,15 +1343,12 @@ class GL:
 
         # Armazena a luz direcional definida na cena (em WORLD).
         # Convertida para view space quando usada no shader.
-        def _norm(c):
-            r,g,b = c
-            return [r,g,b] if 0<=r<=1 and 0<=g<=1 and 0<=b<=1 else [r/255.0,g/255.0,b/255.0]
-        GL._lights.update({
-            "headlight": False,
-            "ambientIntensity": max(0.0, float(ambientIntensity)),
-            "color": _norm(color),
+        Lc = GL._to01(color)
+        GL._lights.setdefault("directionals", []).append({
+            "dir_world": [float(direction[0]), float(direction[1]), float(direction[2])],
+            "color": Lc,
             "intensity": float(intensity),
-            "dir_world": GL._normalize3(direction),
+            "ambient": float(ambientIntensity),
         })
 
     @staticmethod
@@ -1238,8 +1362,7 @@ class GL:
         # zero. A iluminação do nó PointLight diminui com a distância especificada.
 
         # transforma posição pelo ModelView atual
-        r,g,b = color
-        if max(r,g,b) > 1: r,g,b = r/255.0, g/255.0, b/255.0
+        r, g, b = GL._to01(color)
         # posição em view space
         # usa MV( location,1 )
         M = GL._m4_mul(GL._view, GL._model_stack[-1])
@@ -1267,6 +1390,46 @@ class GL:
         print("Fog : color = {0}".format(color)) # imprime no terminal
         print("Fog : visibilityRange = {0}".format(visibilityRange))
 
+
+    @staticmethod
+    def sphere(radius, colors):
+        """Desenha uma esfera por tesselação UV e envia para o indexedFaceSet."""
+        r = float(radius)
+        stacks = 16   # aumente para 24/32 se quiser mais suavidade
+        slices = 24
+
+        coord = []        # [x0,y0,z0, x1,y1,z1, ...]
+        coordIndex = []   # triângulos com -1 separando as faces
+
+        # Geração de vértices (latitude = stacks, longitude = slices)
+        for i in range(stacks + 1):
+            v = i / float(stacks)
+            phi = v * math.pi                      # 0..π
+            y = r * math.cos(phi)
+            sinp = math.sin(phi)
+            for j in range(slices + 1):
+                u = j / float(slices)
+                theta = u * 2.0 * math.pi          # 0..2π
+                x = r * sinp * math.cos(theta)
+                z = r * sinp * math.sin(theta)
+                coord.extend([x, y, z])
+
+        # Helper para index linear no grid
+        def idx(ii, jj):
+            return ii * (slices + 1) + jj
+
+        # Triangulação em duas faces por quad (a,b,c) e (a,c,d)
+        for i in range(stacks):
+            for j in range(slices):
+                a = idx(i,     j)
+                b = idx(i,     j+1)
+                c = idx(i+1,   j+1)
+                d = idx(i+1,   j)
+                coordIndex.extend([a, b, c, -1,  a, c, d, -1])
+
+        # Envia pro seu pipeline (iluminação/transformações já tratadas no indexedFaceSet)
+        GL.indexedFaceSet(coord=coord, coordIndex=coordIndex, colors=colors)
+
     @staticmethod
     def timeSensor(cycleInterval, loop):
         """Gera eventos conforme o tempo passa."""
@@ -1281,38 +1444,68 @@ class GL:
 
         # Deve retornar a fração de tempo passada em fraction_changed
 
-        # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("TimeSensor : cycleInterval = {0}".format(cycleInterval)) # imprime no terminal
-        print("TimeSensor : loop = {0}".format(loop))
-
-        # Esse método já está implementado para os alunos como exemplo
-        epoch = time.time()  # time in seconds since the epoch as a floating point number.
-        fraction_changed = (epoch % cycleInterval) / cycleInterval
-
-        return fraction_changed
+        epoch = time.time()
+        t = (epoch % max(1e-6, cycleInterval)) / max(1e-6, cycleInterval)
+        return t
 
     @staticmethod
-    def splinePositionInterpolator(set_fraction, key, keyValue, closed):
-        """Interpola não linearmente entre uma lista de vetores 3D."""
-        # https://www.web3d.org/specifications/X3Dv4/ISO-IEC19775-1v4-IS/Part01/components/interpolators.html#SplinePositionInterpolator
-        # Interpola não linearmente entre uma lista de vetores 3D. O campo keyValue possui
-        # uma lista com os valores a serem interpolados, key possui uma lista respectiva de chaves
-        # dos valores em keyValue, a fração a ser interpolada vem de set_fraction que varia de
-        # zeroa a um. O campo keyValue deve conter exatamente tantos vetores 3D quanto os
-        # quadros-chave no key. O campo closed especifica se o interpolador deve tratar a malha
-        # como fechada, com uma transições da última chave para a primeira chave. Se os keyValues
-        # na primeira e na última chave não forem idênticos, o campo closed será ignorado.
+    def splinePositionInterpolator(key=None, keyValue=None, set_fraction=0.0, closed=False, **_):
+        """
+        SplinePositionInterpolator (X3D):
+        - key:    [k0..kn]  com 0..1
+        - keyValue: [x,y,z] para cada key (flatten)
+        - set_fraction: f em [0..1]
+        Retorna [x,y,z] interpolado. Usa Catmull-Rom; se não der, usa linear.
+        """
+        if not key or not keyValue:
+            return [0.0, 0.0, 0.0]
 
-        # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("SplinePositionInterpolator : set_fraction = {0}".format(set_fraction))
-        print("SplinePositionInterpolator : key = {0}".format(key)) # imprime no terminal
-        print("SplinePositionInterpolator : keyValue = {0}".format(keyValue))
-        print("SplinePositionInterpolator : closed = {0}".format(closed))
+        # monta lista de pontos 3D
+        P = [(keyValue[i], keyValue[i+1], keyValue[i+2]) for i in range(0, len(keyValue), 3)]
+        K = list(key)
 
-        # Abaixo está só um exemplo de como os dados podem ser calculados e transferidos
-        value_changed = [0.0, 0.0, 0.0]
-        
-        return value_changed
+        # clamp f
+        f = max(0.0, min(1.0, float(set_fraction)))
+
+        # caso trivial: 1 ponto
+        if len(P) == 1:
+            return list(P[0])
+
+        # acha segmento i tal que K[i] <= f <= K[i+1]
+        # se f antes do primeiro ou depois do último, clampa nas extremidades
+        if f <= K[0]:
+            i, u = 0, 0.0
+        elif f >= K[-1]:
+            i, u = len(K) - 2, 1.0
+        else:
+            i = max(0, min(len(K) - 2, next(j for j in range(len(K)-1) if K[j] <= f <= K[j+1])))
+            denom = (K[i+1] - K[i]) or 1e-8
+            u = (f - K[i]) / denom
+
+        # pega P_(i-1), P_i, P_(i+1), P_(i+2) com bordas tratadas
+        def at(idx):
+            if closed:
+                return P[idx % len(P)]
+            return P[max(0, min(len(P)-1, idx))]
+
+        P0 = at(i-1); P1 = at(i); P2 = at(i+1); P3 = at(i+2)
+
+        # Catmull-Rom
+        def cr(p0, p1, p2, p3, t):
+            t2 = t*t; t3 = t2*t
+            return (
+                0.5 * ( (2*p1) + (-p0 + p2)*t + (2*p0 - 5*p1 + 4*p2 - p3)*t2 + (-p0 + 3*p1 - 3*p2 + p3)*t3 )
+            )
+
+        # se tiver poucos pontos, cai no linear
+        if len(P) < 4 and not closed:
+            a = P[i]; b = P[i+1]
+            return [a[0]*(1-u) + b[0]*u, a[1]*(1-u) + b[1]*u, a[2]*(1-u) + b[2]*u]
+
+        x = cr(P0[0], P1[0], P2[0], P3[0], u)
+        y = cr(P0[1], P1[1], P2[1], P3[1], u)
+        z = cr(P0[2], P1[2], P2[2], P3[2], u)
+        return [x, y, z]
 
     @staticmethod
     def orientationInterpolator(set_fraction, key, keyValue):
@@ -1329,15 +1522,66 @@ class GL:
         # zeroa a um. O campo keyValue deve conter exatamente tantas rotações 3D quanto os
         # quadros-chave no key.
 
-        # O print abaixo é só para vocês verificarem o funcionamento, DEVE SER REMOVIDO.
-        print("OrientationInterpolator : set_fraction = {0}".format(set_fraction))
-        print("OrientationInterpolator : key = {0}".format(key)) # imprime no terminal
-        print("OrientationInterpolator : keyValue = {0}".format(keyValue))
+        """Interpola rotações por SLERP (quaternions). keyValue vem em eixos-ângulo."""
+        if not key or not keyValue:
+            return [0.0, 0.0, 1.0, 0.0]
 
-        # Abaixo está só um exemplo de como os dados podem ser calculados e transferidos
-        value_changed = [0, 0, 1, 0]
+        R = [(keyValue[i], keyValue[i+1], keyValue[i+2], keyValue[i+3])
+            for i in range(0, len(keyValue), 4)]
+        K = list(key)
+        f = max(0.0, min(1.0, float(set_fraction)))
 
-        return value_changed
+        if len(R) == 1:
+            return list(R[0])
+
+        # acha segmento
+        if f <= K[0]:
+            i, u = 0, 0.0
+        elif f >= K[-1]:
+            i, u = len(K)-2, 1.0
+        else:
+            i = max(0, min(len(K)-2, next(j for j in range(len(K)-1) if K[j] <= f <= K[j+1])))
+            denom = (K[i+1] - K[i]) or 1e-8
+            u = (f - K[i]) / denom
+
+        import math
+
+        def axis_angle_to_q(ax, ay, az, ang):
+            n = math.sqrt(ax*ax + ay*ay + az*az) or 1.0
+            ax, ay, az = ax/n, ay/n, az/n
+            s = math.sin(ang*0.5)
+            return (math.cos(ang*0.5), ax*s, ay*s, az*s)  # (w, x, y, z)
+
+        def q_to_axis_angle(q):
+            w, x, y, z = q
+            # normaliza
+            n = math.sqrt(w*w + x*x + y*y + z*z) or 1.0
+            w, x, y, z = w/n, x/n, y/n, z/n
+            ang = 2*math.acos(max(-1.0, min(1.0, w)))
+            s = math.sqrt(max(1e-12, 1.0 - w*w))
+            ax, ay, az = x/s, y/s, z/s
+            return [ax, ay, az, ang]
+
+        def slerp(q0, q1, t):
+            w0,x0,y0,z0 = q0; w1,x1,y1,z1 = q1
+            dot = w0*w1 + x0*x1 + y0*y1 + z0*z1
+            # assegura menor arco
+            if dot < 0.0:
+                w1, x1, y1, z1 = -w1, -x1, -y1, -z1
+                dot = -dot
+            if dot > 0.9995:  # quase linear
+                w = w0 + t*(w1-w0); x = x0 + t*(x1-x0); y = y0 + t*(y1-y0); z = z0 + t*(z1-z0)
+                n = math.sqrt(w*w + x*x + y*y + z*z) or 1.0
+                return (w/n, x/n, y/n, z/n)
+            th = math.acos(dot)
+            s0 = math.sin((1.0-t)*th)/math.sin(th)
+            s1 = math.sin(t*th)/math.sin(th)
+            return (w0*s0 + w1*s1, x0*s0 + x1*s1, y0*s0 + y1*s1, z0*s0 + z1*s1)
+
+        a0 = R[i]; a1 = R[i+1]
+        q0 = axis_angle_to_q(*a0); q1 = axis_angle_to_q(*a1)
+        q  = slerp(q0, q1, u)
+        return q_to_axis_angle(q)
 
     # Para o futuro (Não para versão atual do projeto.)
     def vertex_shader(self, shader):
