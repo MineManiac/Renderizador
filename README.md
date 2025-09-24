@@ -1,4 +1,19 @@
 # Renderizador
+Este repositório contém um **renderizador por software (CPU)** escrito em Python, desenvolvido em etapas (Projetos **1.1 → 1.5**) para a disciplina de Computação Gráfica. A cada etapa ampliamos o pipeline, saindo da rasterização 2D até um pipeline 3D com **malhas indexadas, z-buffer, transparência, texturas e iluminação** com animação.
+
+**Escopo por etapas**  
+- **1.1 — 2D**: pontos, linhas (Bresenham) e triângulos em wireframe.  
+- **1.2 — 3D básico**: pipeline **Model · View · Projection → NDC → viewport** e preenchimento de triângulos.  
+- **1.3 — Malhas**: `triangleStripSet`, `indexedTriangleStripSet` e `indexedFaceSet` (triangulação por *fan*).  
+- **1.4 — Aparência**: **interpolação de cores**, **z-buffer**, **transparência (source-over)** e **texturas 2D** com UVs perspectiva-correta.  
+- **1.5 — Iluminação/Animação**: luz **direcional** e **pontual** (Lambert + Blinn-Phong), materiais (`emissive/diffuse/specular/shininess`), normais por vértice/face e **loop de animação** para cenas dinâmicas (ex.: onda, pirâmide, senoide).
+
+**Arquitetura (visão geral)**  
+- `gl.py`: “GPU” emulada (pipeline, rasterização, z/SSAA, texturas, luzes).  
+- `x3d.py`: carregamento do grafo de cena X3D e *traversal*.  
+- `renderizador.py`: *entry point* e orquestração do frame.  
+- `interface.py`: janela/preview e captura de frames.
+
 
 # Projeto 1.1 — Rasterização 2D
 ![Rasterização 2D](imgs/projeto11.png)
@@ -118,4 +133,42 @@ python3 renderizador/renderizador.py -i .\docs\exemplos\3D\texturas\texturas\tex
 
 # Texturas (vários quadros texturizados)
 python3 renderizador/renderizador.py -i .\docs\exemplos\3D\transparencia\transparente\transparente.x3d
+```
+
+# Projeto 1.5 — Iluminação (difusa/especular) e Animação
+![Iluminação e Animação](imgs/projeto152.png)
+
+## Implementações
+- **Luzes**
+  - **DirectionalLight**: suporta `ambientIntensity`, `color` e `direction` (normalizado).
+  - **PointLight**: suporta `color`, `location` e atenuação simples; posição transformada para espaço de mundo.
+  - **Headlight/ambiente padrão**: quando a cena não define luzes, é criada uma luz ambiente/direcional fraca para evitar tela preta.
+  - **Normalização de cores**: helper `GL._to01` aceita `color` em `[0..1]` ou `[0..255]`.
+
+- **Materiais e sombreamento**
+  - Modelo **Lambert + Blinn-Phong**: `I = Iamb + Idiff + Ispec`, com *clamp* em `[0,1]`.
+  - **Materiais**: `emissiveColor`, `diffuseColor`, `specularColor`, `shininess`.
+  - **Normais**: usa normais por vértice quando disponíveis (fallback para normal de face); renormalização após transformações.
+  - **Iluminação por vértice** no caminho de `indexedFaceSet` (cores sombreadas são interpoladas no raster).
+
+- **Animação / Loop de render**
+  - **Atualização por frame** com relógio interno: permite cenas animadas (ex.: `onda.x3d`, `piramide.x3d`, `avatar_animado.x3d`).
+  - Reuso do pipeline do 3D: `Model·View·Projection → NDC → viewport` + **z-buffer** e **SSAA**.
+
+## Decisões de Implementação
+- **Backface culling unificado**: desenha apenas triângulos com `area2 > 0`. 
+- **Helper de cor `_to01`**: evita `AttributeError` e padroniza cores das luzes/materiais.
+- **Performance**: SSAA **2×2** por padrão (qualidade).
+- **Problemas com os exemplos de senoide**: a tela fica preta quando roda esses exemplos.
+
+## Como Executar (exemplos do 1.5)
+```bash
+# Difuso simples (várias luzes)
+python3 renderizador/renderizador.py -i docs/exemplos/3D/iluminacao/difusos/difusos.x3d -w 800 -h 600 -p
+
+# Cena "mineiro" (materiais e luzes)
+python3 renderizador/renderizador.py -i docs/exemplos/3D/iluminacao/mineiro/mineiro.x3d -w 800 -h 600 -p
+
+# Onda animada
+python3 renderizador/renderizador.py -i docs/exemplos/3D/animacoes/onda/onda.x3d -w 800 -h 600 -p
 ```
